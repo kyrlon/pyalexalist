@@ -1,0 +1,5 @@
+**venv**
+client_info.json
+**.egg-info
+*.pyc
+**__pycache__**

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyalexalist"
+version = "0.2.0"
+description = "An unofficial client for the Amazon Alexa Lists API."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "requests",
+]
+
+[project.scripts]
+pyalexalist-get-cookies = "pyalexalist.get_alexa_cookies:main"
+pyalexalist-setup-cli   = "pyalexalist.setup_alexa_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
