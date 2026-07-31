@@ -297,8 +297,6 @@ class AlexaAPI:
                         _days_str, _expiry_utc, _expiry_local, _PYTHON_CMD,
                     )
                     self._last_expiry_warning = now
-            else:
-                logger.debug("Alexa session valid for %d more days", days_left)
             return
 
         # Session is expired — try automatic token refresh first
