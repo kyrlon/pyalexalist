@@ -114,7 +114,8 @@ class ListItem(Resource):
         self._itemId = None
         self._itemName = itemName
         self._itemStatus = ItemCheckedValue.CHECKED if checked else ItemCheckedValue.UNCHECKED
-        self._quantity = quantity #TODO what is max???
+        self._quantity = None
+        self.quantity = quantity
         self._note = note
         self._version = None
         self._deleted = None
@@ -189,7 +190,7 @@ class ListItem(Resource):
     @quantity.setter
     def quantity(self, value: "int | None"):
         v = int(value) if value is not None else None
-        self._quantity = v if v and v > 1 else None
+        self._quantity = min(v, 999) if v and v > 1 else None
         self._dirty_fields.add("quantity")
 
     @property
