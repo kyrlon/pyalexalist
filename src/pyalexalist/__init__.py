@@ -14,7 +14,7 @@ _PYTHON_CMD = Path(sys.executable).stem
 
 import requests
 
-from .exception import AlexaSessionExpiredException
+from .exception import AlexaSessionExpiredException, DuplicateListNameException, DefaultListModificationException
 from .resource import List, ListItem
 
 logger = logging.getLogger(__name__)
@@ -353,8 +353,27 @@ class AlexaAPI:
 
     
     @checkSessionExpiry
-    def createList(self, name: str) -> None:
-        pass
+    def createList(self, name: str) -> "dict | None":
+        """Create a new list on the Alexa server.
+
+        Args:
+            name: Display name for the new list.
+        Returns:
+            Raw list dict (unwrapped from 'listInfo'), or None on failure.
+        Raises:
+            DuplicateListNameException: If a list with this name already exists.
+        """
+        response = self._session.post(self._endpoint_list_api, json={"listName": name})
+        if not response.ok:
+            error_info = self._safe_json(response, f"createList:{name}") or {}
+            if error_info.get("errorType") == "DuplicateListNameException":
+                raise DuplicateListNameException(name)
+            logger.warning("createList HTTP %d for '%s': %s", response.status_code, name, response.text[:200])
+            return None
+        list_info = self._safe_json(response, f"createList:{name}")
+        if not list_info:
+            return None
+        return list_info.get("listInfo")
 
     @checkSessionExpiry
     def createListItem(self, list_id: str, item_name: str, quantity: int | None = None) -> "dict | None":
@@ -456,8 +475,30 @@ class AlexaAPI:
         return self._safe_json(response, "getAllLists")
 
     @checkSessionExpiry
-    def updateList(self) -> None:
-        pass
+    def updateList(self, list_id: str, version_num: int, attribute: "tuple | None" = None) -> "dict | None":
+        """Update a single attribute on an Alexa list, e.g. archiving via listStatus.
+
+        Args:
+            list_id: Server list ID to update.
+            version_num: Current list version; used by the API for optimistic locking.
+            attribute: (type, value) tuple for the attribute to set, e.g. ('listStatus', 'ARCHIVED').
+        Returns:
+            Updated list dict (unwrapped from 'listInfo'), or None on failure.
+        """
+        uri = self._endpoint_list_api + list_id + f"?version={version_num}"
+        attrs_to_update = []
+        if attribute is not None:
+            attrs_to_update.append({"type": attribute[0], "value": attribute[1]})
+        request_body = {"listAttributesToUpdate": attrs_to_update}
+
+        response = self._session.put(uri, json=request_body)
+        if not response.ok:
+            logger.warning("updateList HTTP %d for list %s attr=%s: %s", response.status_code, list_id, attribute, response.text[:200])
+            return None
+        list_info = self._safe_json(response, f"updateList:{list_id}")
+        if not list_info:
+            return None
+        return list_info.get("listInfo")
 
     @checkSessionExpiry
     def updateListItem(self, list_id: str, item_id: str, version_num: int, attribute: "tuple | None" = None, remove_attributes: "list | None" = None) -> "dict | None":
@@ -491,8 +532,21 @@ class AlexaAPI:
         return item_info.get("itemInfo")
 
     @checkSessionExpiry
-    def deleteList(self, list_id: str) -> None:
-        pass
+    def deleteList(self, list_id: str, version_num: int) -> "dict | str":
+        """Delete a list from Alexa.
+
+        Args:
+            list_id: Server list ID to delete.
+            version_num: Current list version for optimistic locking.
+        Returns:
+            Server response dict, or an empty string if the response body was empty.
+        """
+        uri = self._endpoint_list_api + list_id + f"?version={version_num}"
+        response = self._session.delete(uri)
+        content = response.content.decode()
+        if content:
+            return json.loads(content)
+        return content
 
     @checkSessionExpiry
     def deleteListItem(self, list_id: str, item_id: str, version_num: int) -> "dict | str":
@@ -596,26 +650,80 @@ class AlexaList:
             and (func is None or func(lst))
         ]
         #TODO double check with gkeep about generators?
-    #TODO archived?
 
     def createList(self, name: str) -> List:
-        """Create a new list on the server and register it locally."""
-        raise NotImplementedError("createList API not yet implemented")
-        #TODO look more into this after proper migration
-        #TODO look more into this after proper migration
+        """Create a new list on the server and register it locally.
+
+        Args:
+            name: Display name for the new list.
+        Returns:
+            The newly created List.
+        Raises:
+            RuntimeError: If the server request failed.
+        """
+        raw = self.alexa_api.createList(name)
+        if not raw:
+            raise RuntimeError(f"createList failed for '{name}'")
+        lst = List()
+        lst.load(raw)
+        self._lists[lst.id] = lst
+        return lst
 
     def deleteList(self, name: str) -> None:
         """Delete a list from the server and remove it locally.
 
         Args:
             name: Display name of the list to delete.
+        Raises:
+            DefaultListModificationException: If name is one of Alexa's built-in SHOP/TODO lists.
         """
         lst = self.get(name)
         if not lst:
             return
-        self.alexa_api.deleteList(lst.listId)
+        if not lst.isCustom:
+            raise DefaultListModificationException(name, "delete")
+        self.alexa_api.deleteList(lst.listId, lst.version)
         del self._lists[lst.id]
-        #TODO look more into this after proper migration
+
+    def archiveList(self, name: str) -> None:
+        """Mark a list as archived locally. Call push() to sync the change to the server.
+
+        Args:
+            name: Display name of the list to archive.
+        Raises:
+            DefaultListModificationException: If name is one of Alexa's built-in SHOP/TODO lists.
+        """
+        lst = self.get(name)
+        if not lst:
+            return
+        lst.archived = True
+
+    def unarchiveList(self, name: str) -> None:
+        """Mark a list as unarchived locally. Call push() to sync the change to the server.
+
+        Args:
+            name: Display name of the list to unarchive.
+        Raises:
+            DefaultListModificationException: If name is one of Alexa's built-in SHOP/TODO lists.
+        """
+        lst = self.get(name)
+        if not lst:
+            return
+        lst.archived = False
+
+    def renameList(self, name: str, new_name: str) -> None:
+        """Rename a list locally. Call push() to sync the change to the server.
+
+        Args:
+            name: Current display name of the list.
+            new_name: New display name to set.
+        Raises:
+            DefaultListModificationException: If name is one of Alexa's built-in SHOP/TODO lists.
+        """
+        lst = self.get(name)
+        if not lst:
+            return
+        lst.listName = new_name
 
     def resync(self) -> None:
         """Discard all local state and rebuild from a full server fetch."""
@@ -624,10 +732,8 @@ class AlexaList:
             return
         self._lists = {}
         for raw_list in raw["listInfoList"]:
-            # name = raw_list.get("listName")
-            name = raw_list.get("listName", raw_list["listType"]) #TODO look into
-            lst = List(name)
-            lst.listId = raw_list["listId"]
+            lst = List()
+            lst.load(raw_list)
             self._lists[lst.id] = lst
 
             raw_items = self.alexa_api.getList(lst.listId)
@@ -649,16 +755,13 @@ class AlexaList:
         if not raw:
             return
         for raw_list in raw["listInfoList"]:
-            name = raw_list.get("listName", raw_list["listType"])
             list_id = raw_list["listId"]
 
             lst = self.get(list_id=list_id)
             if lst is None:
-                lst = List(name)
-                lst.listId = list_id
+                lst = List()
                 self._lists[lst.id] = lst
-            else:
-                lst.name = name
+            lst.load(raw_list)
 
             raw_items = self.alexa_api.getList(list_id)
             if not raw_items or "itemInfoList" not in raw_items:
@@ -666,7 +769,7 @@ class AlexaList:
 
             seen_item_ids = {i["itemId"] for i in raw_items["itemInfoList"]}
             for item in [i for i in lst.items if i.itemId is not None and i.itemId not in seen_item_ids]:
-                lst._items.pop(item.id, None)
+                lst.remove(item)
 
             for raw_item in raw_items["itemInfoList"]:
                 existing = lst.get(item_id=raw_item["itemId"])
@@ -694,22 +797,47 @@ class AlexaList:
             list_id = lst.listId
             if list_id is None:
                 continue
+            if lst.dirty_fields:
+                for attribute in list(lst.dirty_fields):
+                    match attribute:
+                        case "listName":
+                            if not force and lst.name == lst._server_name:
+                                lst.dirty_fields.discard("listName")
+                                continue
+                            attr = ("listName", lst.name)
+                            new_list_info = self.alexa_api.updateList(list_id, lst.version, attr)
+                            if new_list_info:
+                                lst.load(new_list_info)
+                            else:
+                                logger.warning("push: updateList listName failed for '%s'", lst.name)
+                        case "listStatus":
+                            new_status = "ARCHIVED" if lst.archived else "ACTIVE"
+                            if not force and new_status == lst._server_listStatus:
+                                lst.dirty_fields.discard("listStatus")
+                                continue
+                            attr = ("listStatus", new_status)
+                            new_list_info = self.alexa_api.updateList(list_id, lst.version, attr)
+                            if new_list_info:
+                                lst.load(new_list_info)
+                            else:
+                                logger.warning("push: updateList listStatus failed for '%s'", lst.name)
             for item in lst.items:
                 if item.deleted and item.itemId is None:
-                    lst._items.pop(item.id, None)
+                    lst.remove(item)
+
                 elif item.deleted:
                     self.alexa_api.deleteListItem(list_id, item.itemId, item.version)
-                    lst._items.pop(item.id, None)
+                    lst.remove(item)
                 elif item.itemId is None:
                     raw = self.alexa_api.createListItem(list_id, item.itemName, item.quantity)
                     if raw:
                         item.load(raw)
-                elif item._dirty_fields:
-                    for attribute in list(item._dirty_fields):
+                elif item.dirty_fields:
+                    for attribute in list(item.dirty_fields):
                         match attribute:
                             case "itemName":
                                 if not force and item.itemName == item._server_itemName:
-                                    item._dirty_fields.discard("itemName")
+                                    item.dirty_fields.discard("itemName")
                                     continue
                                 attr = ("itemName", item.itemName)
                                 new_item_info = self.alexa_api.updateListItem(list_id, item.itemId, item.version, attr)
@@ -719,7 +847,7 @@ class AlexaList:
                                     logger.warning("push: updateListItem itemName failed for '%s'", item.itemName)
                             case "itemStatus":
                                 if not force and item.checked == item._server_itemStatus:
-                                    item._dirty_fields.discard("itemStatus")
+                                    item.dirty_fields.discard("itemStatus")
                                     continue
                                 attr = ("itemStatus", item.checked.label)
                                 new_item_info = self.alexa_api.updateListItem(list_id, item.itemId, item.version, attr)
@@ -729,7 +857,7 @@ class AlexaList:
                                     logger.warning("push: updateListItem itemStatus failed for '%s' (tried: %s)", item.itemName, item.checked.label)
                             case "quantity":
                                 if not force and item.quantity == item._server_quantity:
-                                    item._dirty_fields.discard("quantity")
+                                    item.dirty_fields.discard("quantity")
                                     continue
                                 if item.quantity is None or item.quantity < 2:
                                     new_item_info = self.alexa_api.updateListItem(list_id, item.itemId, item.version, remove_attributes=["quantity"])

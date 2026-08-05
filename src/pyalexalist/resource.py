@@ -5,6 +5,8 @@ import enum
 from collections.abc import Callable
 from operator import attrgetter
 
+from .exception import DefaultListModificationException
+
 
 class ItemCheckedValue(int, enum.Enum):
     """Alexa item status enum; int-compatible for comparisons, with a string label for API calls."""
@@ -62,7 +64,7 @@ class Resource:
         self._id = self.generateId()
         self._createdTime = None
         self._updatedTime = None
-        self._dirty_fields: set[str] = set()
+        self.dirty_fields: set[str] = set()
 
     @classmethod
     def generateId(cls) -> str:
@@ -136,7 +138,7 @@ class ListItem(Resource):
         self.createdTime = raw_item["createAt"]
         self.updatedTime = raw_item["updateAt"]
         self._version = raw_item["version"]
-        self.quantity = raw_item.get("quantity")
+        self.quantity = raw_item["quantity"]
         if clean:
             self.clean()
 
@@ -149,10 +151,6 @@ class ListItem(Resource):
     @property
     def deleted(self) -> "bool | None":
         return self._deleted
-    
-    @deleted.setter
-    def deleted(self, value: "bool | None"):
-        self._deleted = value
 
     @property
     def itemId(self) -> "str | None":
@@ -165,7 +163,7 @@ class ListItem(Resource):
     @itemName.setter
     def itemName(self, value: str):
         self._itemName = value.strip()
-        self._dirty_fields.add("itemName")
+        self.dirty_fields.add("itemName")
 
     @property
     def checked(self) -> "ItemCheckedValue":
@@ -177,7 +175,7 @@ class ListItem(Resource):
             self._itemStatus = value
         else:
             self._itemStatus = ItemCheckedValue.CHECKED if value else ItemCheckedValue.UNCHECKED
-        self._dirty_fields.add("itemStatus")
+        self.dirty_fields.add("itemStatus")
     
     @property
     def version(self) -> "int | None":
@@ -191,22 +189,26 @@ class ListItem(Resource):
     def quantity(self, value: "int | None"):
         v = int(value) if value is not None else None
         self._quantity = min(v, 999) if v and v > 1 else None
-        self._dirty_fields.add("quantity")
+        self.dirty_fields.add("quantity")
 
     @property
     def dirty(self) -> bool:
-        return self._itemId is None or bool(self._dirty_fields) or self.deleted
+        return self._itemId is None or bool(self.dirty_fields) or self.deleted
     
     def clean(self) -> None:
         """Clear dirty flags and snapshot current field values as the last-known server baseline."""
-        self._dirty_fields.clear()
+        self.dirty_fields.clear()
         self._deleted = None
         self._server_itemName = self._itemName
         self._server_itemStatus = self._itemStatus
         self._server_quantity = self._quantity
 
     def __str__(self) -> str:
-        return self._itemName
+        text = f"{self.itemName} x{self.quantity}" if self.quantity and self.quantity > 1 else self.itemName
+        return "{} {}".format(
+            "☑" if self.checked else "☐",
+            text,
+        )
 
     def __repr__(self) -> str:
         return (
@@ -229,15 +231,100 @@ class ListItem(Resource):
 class List(Resource):
     """pyalexalist list — holds ListItem instances and exposes sorted/filtered views over server state."""
 
-    def __init__(self, name: str) -> None:
+    _DEFAULT_LIST_TYPES = {"SHOP", "TODO"}
+
+    def __init__(self, listName: str = "") -> None:
         super().__init__()
-        self.name = name
-        self.listId = None
+        self._listName = listName
+        self._listId = None
+        self._listType = None
+        self._listStatus = None
+        self._version = None
         self._items = {}
-        #TODO add docstrings
-        #archive
-        #default lists??
-        #custom ones??
+        self._deleted = None
+        self._server_listName = None
+        self._server_listStatus = None
+
+    def delete(self) -> None:
+        if not self.isCustom:
+            raise DefaultListModificationException(self.listName, "delete")
+        self._deleted = True
+
+    def undelete(self) -> None:
+        if not self.isCustom:
+            raise DefaultListModificationException(self.listName, "delete")
+        self._deleted = False
+
+    @property
+    def deleted(self) -> "bool | None":
+        return self._deleted
+
+    def load(self, raw_list: dict, clean: bool = True) -> None:
+        """Populate fields from a raw Alexa API list dict.
+
+        Args:
+            raw_list: API response dict with keys listId, listName (or listType as a
+                fallback name for default lists), listType, listStatus, version, etc.
+            clean: If True (default), clear dirty flags after loading.
+        """
+        self._listName = raw_list.get("listName", raw_list["listType"])
+        self.createdTime = raw_list["createAt"]
+        self.updatedTime = raw_list["updateAt"]
+        self._listId = raw_list["listId"]
+        self._listType = raw_list["listType"]
+        self._listStatus = raw_list["listStatus"]
+        self._version = raw_list["version"]
+        if clean:
+            self.clean()
+
+    def clean(self) -> None:
+        """Clear dirty flags and snapshot current field values as the last-known server baseline."""
+        self.dirty_fields.clear()
+        self._deleted = None
+        self._server_listName = self._listName
+        self._server_listStatus = self._listStatus
+
+    @property
+    def listName(self):
+        return self._listName
+
+    @listName.setter
+    def listName(self, value: str):
+        if not self.isCustom:
+            raise DefaultListModificationException(self.listName, "rename")
+        self._listName = value
+        self.dirty_fields.add("listName")
+
+    @property
+    def version(self):
+        return self._version
+
+    @property
+    def listId(self) -> "str | None":
+        return self._listId
+
+    @property
+    def listType(self) -> "str | None":
+        return self._listType
+
+    @property
+    def isCustom(self) -> bool:
+        """True for user-created lists; False for Alexa's built-in SHOP/TODO lists."""
+        return self._listType not in self._DEFAULT_LIST_TYPES
+
+    @property
+    def archived(self) -> bool:
+        return self._listStatus == "ARCHIVED"
+
+    @archived.setter
+    def archived(self, value: bool):
+        if not self.isCustom:
+            raise DefaultListModificationException(self.listName, "archive" if value else "unarchive")
+        if value:
+            self._listStatus = "ARCHIVED"
+        else:
+            self._listStatus = "ACTIVE"
+        self.dirty_fields.add("listStatus")
 
     def get(self, name: str | None = None, *, id: str | None = None, item_id: str | None = None) -> "ListItem | None":
         """Look up a single item by name, internal UUID, or server item_id.
@@ -279,7 +366,7 @@ class List(Resource):
         #TODO better approach?? item_id???
 
     def remove(self, new_item: ListItem) -> None:
-        del self._items[new_item.id]
+        self._items.pop(new_item.id, None)
 
     @property
     def items(self) -> list[ListItem]:
@@ -304,11 +391,16 @@ class List(Resource):
     @property
     def supportsQuantity(self) -> bool:
         """False for Alexa to-do lists — they have no quantity field."""
-        return self.name.casefold() != "todo"
+        return self.listName.casefold() != "todo"
     
     @property
     def dirty(self) -> bool:
-        return bool(self._dirty_fields) or any(item.dirty for item in self.items)
+        return bool(self.dirty_fields) or self.deleted or any(item.dirty for item in self.items)
+
+    @property
+    def text(self) -> str: 
+        return "\n".join(str(i) for i in self.items)
+
     
     # checked??
 
@@ -333,4 +425,6 @@ class List(Resource):
         """
         return sorted(self._items.values(), key=key, reverse=reverse)
 
- 
+    def __str__(self) -> str:
+        return "\n".join([self.listName] + [str(i) for i in self.items])
+    

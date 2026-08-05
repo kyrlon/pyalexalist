@@ -15,3 +15,20 @@ class AlexaSessionExpiredException(Exception):
             f"re-run {_PYTHON_CMD} -m pyalexalist.get_alexa_cookies to refresh"
         )
         self.expired_at = expired_at
+
+
+class DuplicateListNameException(Exception):
+    """Raised when creating a list whose name already exists (Alexa disallows duplicate list names)."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"A list named '{name}' already exists")
+        self.name = name
+
+
+class DefaultListModificationException(Exception):
+    """Raised when attempting to delete, rename, or archive one of Alexa's built-in SHOP/TODO lists."""
+
+    def __init__(self, name: str, action: str) -> None:
+        super().__init__(f"Cannot {action} '{name}' — SHOP and TODO are built-in lists and cannot be modified this way")
+        self.name = name
+        self.action = action
