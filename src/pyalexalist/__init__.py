@@ -685,46 +685,6 @@ class AlexaList:
         self.alexa_api.deleteList(lst.listId, lst.version)
         del self._lists[lst.id]
 
-    def archiveList(self, name: str) -> None:
-        """Mark a list as archived locally. Call push() to sync the change to the server.
-
-        Args:
-            name: Display name of the list to archive.
-        Raises:
-            DefaultListModificationException: If name is one of Alexa's built-in SHOP/TODO lists.
-        """
-        lst = self.get(name)
-        if not lst:
-            return
-        lst.archived = True
-
-    def unarchiveList(self, name: str) -> None:
-        """Mark a list as unarchived locally. Call push() to sync the change to the server.
-
-        Args:
-            name: Display name of the list to unarchive.
-        Raises:
-            DefaultListModificationException: If name is one of Alexa's built-in SHOP/TODO lists.
-        """
-        lst = self.get(name)
-        if not lst:
-            return
-        lst.archived = False
-
-    def renameList(self, name: str, new_name: str) -> None:
-        """Rename a list locally. Call push() to sync the change to the server.
-
-        Args:
-            name: Current display name of the list.
-            new_name: New display name to set.
-        Raises:
-            DefaultListModificationException: If name is one of Alexa's built-in SHOP/TODO lists.
-        """
-        lst = self.get(name)
-        if not lst:
-            return
-        lst.listName = new_name
-
     def resync(self) -> None:
         """Discard all local state and rebuild from a full server fetch."""
         raw = self.alexa_api.getAllLists()
