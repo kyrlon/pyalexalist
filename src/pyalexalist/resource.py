@@ -124,6 +124,7 @@ class ListItem(Resource):
         "_server_itemName",
         "_server_itemStatus",
         "_server_quantity",
+        "_server_note",
     )
 
     def __init__(self, itemName: str = "", checked: bool = False, quantity: int | None = None, note: str | None = None) -> None:
@@ -139,6 +140,7 @@ class ListItem(Resource):
         self._server_itemName = None
         self._server_itemStatus = None
         self._server_quantity = None
+        self._server_note = None
 
     def load(self, raw_item: dict, clean: bool = True) -> None:
         """Populate fields from a raw Alexa API item dict and optionally snapshot server state.
@@ -154,6 +156,7 @@ class ListItem(Resource):
         self.updatedTime = raw_item["updateAt"]
         self._version = raw_item["version"]
         self.quantity = raw_item["quantity"]
+        self.note = raw_item.get("note")
         if clean:
             self.clean()
 
@@ -207,6 +210,15 @@ class ListItem(Resource):
         self.dirty_fields.add("quantity")
 
     @property
+    def note(self) -> "str | None":
+        return self._note
+
+    @note.setter
+    def note(self, value: "str | None"):
+        self._note = value[:256] if value else value
+        self.dirty_fields.add("note")
+
+    @property
     def dirty(self) -> bool:
         return self._itemId is None or bool(self.dirty_fields) or self.deleted
     
@@ -217,6 +229,7 @@ class ListItem(Resource):
         self._server_itemName = self._itemName
         self._server_itemStatus = self._itemStatus
         self._server_quantity = self._quantity
+        self._server_note = self._note
 
     def __str__(self) -> str:
         text = f"{self.itemName} x{self.quantity}" if self.quantity and self.quantity > 1 else self.itemName
