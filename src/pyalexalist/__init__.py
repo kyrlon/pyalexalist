@@ -715,6 +715,11 @@ class AlexaList:
         raw = self.alexa_api.getAllLists()
         if not raw:
             return
+
+        seen_list_ids = {raw_list["listId"] for raw_list in raw["listInfoList"]}
+        for stale_lst in [l for l in self._lists.values() if l.listId is not None and l.listId not in seen_list_ids]:
+            del self._lists[stale_lst.id]
+
         for raw_list in raw["listInfoList"]:
             list_id = raw_list["listId"]
 
