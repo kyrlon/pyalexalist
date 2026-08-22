@@ -349,9 +349,7 @@ class AlexaAPI:
             self.check_session_expiry()
             return func(self, *args, **kwargs)
         return wrapper
-
-
-    
+   
     @checkSessionExpiry
     def createList(self, name: str) -> "dict | None":
         """Create a new list on the Alexa server.
@@ -376,13 +374,14 @@ class AlexaAPI:
         return list_info.get("listInfo")
 
     @checkSessionExpiry
-    def createListItem(self, list_id: str, item_name: str, quantity: int | None = None) -> "dict | None":
+    def createListItem(self, list_id: str, item_name: str, quantity: int | None = None, note: "str | None" = None) -> "dict | None":
         """Create a new item on the Alexa list and return the server response dict.
 
         Args:
             list_id: Server list ID to add the item to.
             item_name: Display name for the new item.
             quantity: Optional quantity; omitted from the request if None or ≤ 1.
+            note: Optional note text; omitted from the request if None/empty.
         Returns:
             Raw item dict from the server, or None on failure.
         """
@@ -390,6 +389,8 @@ class AlexaAPI:
         attrs_to_create = []
         if quantity and quantity > 1:
             attrs_to_create.append({"type": "quantity", "value": quantity})
+        if note:
+            attrs_to_create.append({"type": "note", "value": note})
         request_body = {
             "items": [
                 {
@@ -789,7 +790,7 @@ class AlexaList:
                     self.alexa_api.deleteListItem(list_id, item.itemId, item.version)
                     lst.remove(item)
                 elif item.itemId is None:
-                    raw = self.alexa_api.createListItem(list_id, item.itemName, item.quantity)
+                    raw = self.alexa_api.createListItem(list_id, item.itemName, item.quantity, item.note)
                     if raw:
                         item.load(raw)
                 elif item.dirty_fields:
@@ -828,6 +829,19 @@ class AlexaList:
                                     item.load(new_item_info)
                                 else:
                                     logger.warning("push: updateListItem quantity failed for '%s'", item.itemName)
+                            case "note":
+                                if not force and item.note == item._server_note:
+                                    item.dirty_fields.discard("note")
+                                    continue
+                                if not item.note:
+                                    new_item_info = self.alexa_api.updateListItem(list_id, item.itemId, item.version, remove_attributes=["note"])
+                                else:
+                                    attr = ("note", item.note)
+                                    new_item_info = self.alexa_api.updateListItem(list_id, item.itemId, item.version, attr)
+                                if new_item_info:
+                                    item.load(new_item_info)
+                                else:
+                                    logger.warning("push: updateListItem note failed for '%s'", item.itemName)
 
     def sync(self, force: bool = False) -> None:
         """Pull fresh server state then push pending local changes.
