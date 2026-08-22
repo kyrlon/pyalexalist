@@ -626,7 +626,7 @@ class AlexaList:
             The first matching List, or None.
         """
         if name is not None:
-            return next((lst for lst in self._lists.values() if lst.name == name), None)
+            return next((lst for lst in self._lists.values() if lst.listName == name), None)
         if id is not None:
             return next((lst for lst in self._lists.values() if lst.id == id), None)
         if list_id is not None:
@@ -646,7 +646,7 @@ class AlexaList:
         """
         return [
             lst for lst in self._lists.values()
-            if (query is None or query.casefold() in lst.name.casefold())
+            if (query is None or query.casefold() in lst.listName.casefold())
             and (func is None or func(lst))
         ]
         #TODO double check with gkeep about generators?
@@ -761,15 +761,15 @@ class AlexaList:
                 for attribute in list(lst.dirty_fields):
                     match attribute:
                         case "listName":
-                            if not force and lst.name == lst._server_name:
+                            if not force and lst.listName == lst._server_listName:
                                 lst.dirty_fields.discard("listName")
                                 continue
-                            attr = ("listName", lst.name)
+                            attr = ("listName", lst.listName)
                             new_list_info = self.alexa_api.updateList(list_id, lst.version, attr)
                             if new_list_info:
                                 lst.load(new_list_info)
                             else:
-                                logger.warning("push: updateList listName failed for '%s'", lst.name)
+                                logger.warning("push: updateList listName failed for '%s'", lst.listName)
                         case "listStatus":
                             new_status = "ARCHIVED" if lst.archived else "ACTIVE"
                             if not force and new_status == lst._server_listStatus:
@@ -780,7 +780,7 @@ class AlexaList:
                             if new_list_info:
                                 lst.load(new_list_info)
                             else:
-                                logger.warning("push: updateList listStatus failed for '%s'", lst.name)
+                                logger.warning("push: updateList listStatus failed for '%s'", lst.listName)
             for item in lst.items:
                 if item.deleted and item.itemId is None:
                     lst.remove(item)

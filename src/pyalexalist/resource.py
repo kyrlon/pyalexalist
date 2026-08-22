@@ -60,6 +60,8 @@ class ItemCheckedValue(int, enum.Enum):
 class Resource:
     """Base class providing a UUID, created/updated timestamps, and a set of dirty field names."""
 
+    __slots__ = ("_id","_createdTime", "_updatedTime", "dirty_fields" )
+
     def __init__(self) -> None:
         self._id = self.generateId()
         self._createdTime = None
@@ -110,6 +112,19 @@ class Resource:
 
 class ListItem(Resource):
     """Alexa list item with dirty-tracking properties and a server snapshot for no-op push detection."""
+
+    __slots__ = (
+        "_itemId",
+        "_itemName",
+        "_itemStatus",
+        "_quantity",
+        "_note",
+        "_version",
+        "_deleted",
+        "_server_itemName",
+        "_server_itemStatus",
+        "_server_quantity",
+    )
 
     def __init__(self, itemName: str = "", checked: bool = False, quantity: int | None = None, note: str | None = None) -> None:
         super().__init__()
@@ -209,29 +224,31 @@ class ListItem(Resource):
             "☑" if self.checked else "☐",
             text,
         )
+    #TODO NOTES?
 
     def __repr__(self) -> str:
         return (
             f"ListItem(itemName={self._itemName!r}, quantity={self._quantity!r}, "
             f"checked={self._itemStatus!r}, itemId={self._itemId!r}, id={self.id!r})"
         )
-
-
-#TODO qty? note?? check box??
-#    def __str__(self) -> str:
-#         return "{}{} {}".format(
-#             "  " if self.indented else "",
-#             "☑" if self.checked else "☐",
-#             self.text,
-#         )
-
-#     def __str__(self) -> str:
-#         return "\n".join([self.title] + [str(node) for node in self.items])
+    #TODO NOTES?
 
 class List(Resource):
     """pyalexalist list — holds ListItem instances and exposes sorted/filtered views over server state."""
 
     _DEFAULT_LIST_TYPES = {"SHOP", "TODO"}
+
+    __slots__ = (
+        "_listName",
+        "_listId",
+        "_listType",
+        "_listStatus",
+        "_version",
+        "_items",
+        "_deleted",
+        "_server_listName",
+        "_server_listStatus",
+    )
 
     def __init__(self, listName: str = "") -> None:
         super().__init__()
@@ -359,53 +376,54 @@ class List(Resource):
         self._items[item.id] = item
         return item
 
-#TODO need to check if these are good getters?????
-# def sort_items(
     def update(self, new_item: ListItem) -> None:
+        """Insert or replace an item, keyed by its id.
+        """
         self._items[new_item.id] = new_item
-        #TODO better approach?? item_id???
 
     def remove(self, new_item: ListItem) -> None:
         self._items.pop(new_item.id, None)
 
     @property
     def items(self) -> list[ListItem]:
+        """Get all items, including ones locally marked for deletion but not yet pushed.
+
+        Used internally by push()/pull()/dirty, which need to see pending deletions.
+        Use checkedItems/uncheckedItems for a display-oriented, deletion-filtered view.
+        """
         return list(self._items.values())
 
-    @property
-    def namesOfUncheckedItems(self) -> list[str]:
-        return sorted(item.itemName for item in self._items.values() if not item.checked)
+    def _visible_items(self, checked: "bool | None" = None) -> list[ListItem]:
+        """Return items excluding ones locally marked for deletion, optionally filtered by checked state."""
+        return [
+            item for item in self._items.values()
+            if not item.deleted and (checked is None or bool(item.checked) == checked)
+        ]
 
     @property
-    def namesOfCheckedItems(self) -> list[str]:
-        return sorted(item.itemName for item in self._items.values() if item.checked)
+    def checkedItems(self) -> list[ListItem]:
+        return self._visible_items(True)
 
     @property
-    def idsOfItems(self) -> list[str]:
-        return [item.id for item in self._items.values()]
-
-    @property
-    def serverIdsOfItems(self) -> list[str | None]:
-        return [item.itemId for item in self._items.values()]
+    def uncheckedItems(self) -> list[ListItem]:
+        return self._visible_items(False)
 
     @property
     def supportsQuantity(self) -> bool:
         """False for Alexa to-do lists — they have no quantity field."""
         return self.listName.casefold() != "todo"
-    
+
     @property
     def dirty(self) -> bool:
         return bool(self.dirty_fields) or self.deleted or any(item.dirty for item in self.items)
 
     @property
-    def text(self) -> str: 
-        return "\n".join(str(i) for i in self.items)
-
-    
-    # checked??
+    def text(self) -> str:
+        return "\n".join(str(i) for i in self._visible_items())
 
     def sort_items(self, key: Callable = attrgetter("updatedTime"), reverse: bool = True) -> None:
-        """Sort items in place. Defaults to newest first, matching Alexa's default order.
+        """Reorder items in place. Local view only, so it is NOT pushed to the server
+        and will be overwritten by the next pull()/resync().
 
         Args:
             key: Sort key callable; defaults to updatedTime.
@@ -414,17 +432,6 @@ class List(Resource):
         sorted_list = sorted(self._items.values(), key=key, reverse=reverse)
         self._items = {item.id: item for item in sorted_list}
 
-    def sorted_items(self, key: Callable = attrgetter("updatedTime"), reverse: bool = True) -> list["ListItem"]:
-        """Return a sorted copy without mutating the list. Defaults to newest first.
-
-        Args:
-            key: Sort key callable; defaults to updatedTime.
-            reverse: Descending order when True.
-        Returns:
-            Sorted list of ListItem objects.
-        """
-        return sorted(self._items.values(), key=key, reverse=reverse)
-
     def __str__(self) -> str:
-        return "\n".join([self.listName] + [str(i) for i in self.items])
+        return "\n".join([self.listName] + [str(i) for i in self._visible_items()])
     
