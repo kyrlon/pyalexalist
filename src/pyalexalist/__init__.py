@@ -4,6 +4,7 @@ import logging
 import sys
 import time
 import uuid
+from collections.abc import Iterator
 from email.utils import parsedate_to_datetime
 from functools import wraps
 from pathlib import Path
@@ -638,19 +639,19 @@ class AlexaList:
         """Get all lists."""
         return list(self._lists.values())
 
-    def find(self, query: str | None = None, func=None) -> list[List]:
-        """Find lists matching the given criteria.
+    def find(self, query: str | None = None, func=None) -> Iterator[List]:
+        """Find lists matching the given criteria. Lazy iteration, which
+        returns a generator rather than a list.
 
         Args:
             query: Case-insensitive substring match against list name.
             func: A filter function applied to each List object.
         """
-        return [
+        return (
             lst for lst in self._lists.values()
             if (query is None or query.casefold() in lst.listName.casefold())
             and (func is None or func(lst))
-        ]
-        #TODO double check with gkeep about generators?
+        )
 
     def createList(self, name: str) -> List:
         """Create a new list on the server and register it locally.
