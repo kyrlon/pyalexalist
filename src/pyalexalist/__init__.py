@@ -639,18 +639,20 @@ class AlexaList:
         """Get all lists."""
         return list(self._lists.values())
 
-    def find(self, query: str | None = None, func=None) -> Iterator[List]:
+    def find(self, query: str | None = None, func=None, archived: bool | None = None) -> Iterator[List]:
         """Find lists matching the given criteria. Lazy iteration, which
         returns a generator rather than a list.
 
         Args:
             query: Case-insensitive substring match against list name.
             func: A filter function applied to each List object.
+            archived: If set, only match lists whose archived state equals this value.
         """
         return (
             lst for lst in self._lists.values()
             if (query is None or query.casefold() in lst.listName.casefold())
             and (func is None or func(lst))
+            and (archived is None or lst.archived == archived)
         )
 
     def createList(self, name: str) -> List:
