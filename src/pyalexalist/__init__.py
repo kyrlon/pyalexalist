@@ -423,7 +423,7 @@ class AlexaAPI:
 
         Args:
             list_id: Server list ID to fetch.
-            max_pages: Safety cap on pages followed (100 items/page) before giving
+            max_pages: Safety cap on pages followed (20 items/page) before giving
                 up (logged as a warning).
         Yields:
             list[dict]: the raw item dicts for each page, in order.
@@ -450,7 +450,12 @@ class AlexaAPI:
                 {"type": "categoryOverride"},
             ],
         }
-        uri = self._endpoint_list_api + list_id + "/items/fetch?limit=100"
+        # limit=20 is deliberate, not arbitrary: empirically, limit=50 and limit=100
+        # returned itemInfoList=[] with nextToken=null which gave a false
+        # "empty and done" response even when real items existed further in the
+        # list. limit=20 (and omitting limit entirely) consistently returned the
+        # correct data and a real nextToken.
+        uri = self._endpoint_list_api + list_id + "/items/fetch?limit=20"
 
         next_token = None
         for page_num in range(max_pages):
@@ -476,7 +481,7 @@ class AlexaAPI:
 
         Args:
             list_id: Server list ID to fetch.
-            max_pages: Safety cap on pages followed (100 items/page) before giving
+            max_pages: Safety cap on pages followed (20 items/page) before giving
                 up and returning whatever was collected so far.
         Returns:
             Dict with a merged 'itemInfoList' covering every page, or None if the
