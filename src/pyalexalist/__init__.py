@@ -412,13 +412,21 @@ class AlexaAPI:
         return items[0]
 
     @checkSessionExpiry
-    def getList(self, list_id: str) -> "dict | None":
-        """Fetch all items in a list from the Alexa API.
+    def iterListItemPages(self, list_id: str, max_pages: int = 50):
+        """Yield each page's itemInfoList from the Alexa API, following pagination.
+
+        The server caps each response at the requested `limit` and hands back a
+        `nextToken` when more items remain — a single request silently truncates
+        the list past that page. This follows `nextToken` until the server stops
+        returning one, yielding one page at a time rather than accumulating
+        everything in memory (useful for lists with tens of thousands of items).
 
         Args:
             list_id: Server list ID to fetch.
-        Returns:
-            Raw API response dict with 'itemInfoList', or None on failure.
+            max_pages: Safety cap on pages followed (100 items/page) before giving
+                up (logged as a warning).
+        Yields:
+            list[dict]: the raw item dicts for each page, in order.
         """
         payload = {
             "itemAttributesToProject": [
@@ -443,8 +451,45 @@ class AlexaAPI:
             ],
         }
         uri = self._endpoint_list_api + list_id + "/items/fetch?limit=100"
-        response = self._session.post(uri, json=payload)
-        return self._safe_json(response, f"getList:{list_id}")
+
+        next_token = None
+        for page_num in range(max_pages):
+            request_body = dict(payload, **({"nextToken": next_token} if next_token else {}))
+            response = self._session.post(uri, json=request_body)
+            page = self._safe_json(response, f"getList:{list_id} (page {page_num})")
+            if not page:
+                if page_num > 0:
+                    logger.warning("getList:%s failed on page %d — stopping pagination", list_id, page_num)
+                return
+            yield page.get("itemInfoList", [])
+            next_token = page.get("nextToken")
+            if not next_token:
+                return
+        logger.warning("getList:%s hit the %d-page pagination cap; list may be truncated", list_id, max_pages)
+
+    def getList(self, list_id: str, max_pages: int = 50) -> "dict | None":
+        """Fetch every item in a list from the Alexa API, following pagination.
+
+        Convenience wrapper over `iterListItemPages()` that merges every page into
+        one dict. For large lists, prefer iterating `iterListItemPages()` directly
+        to avoid holding everything in memory at once.
+
+        Args:
+            list_id: Server list ID to fetch.
+            max_pages: Safety cap on pages followed (100 items/page) before giving
+                up and returning whatever was collected so far.
+        Returns:
+            Dict with a merged 'itemInfoList' covering every page, or None if the
+            first page failed to return anything.
+        """
+        all_items = []
+        got_a_page = False
+        for page_items in self.iterListItemPages(list_id, max_pages=max_pages):
+            got_a_page = True
+            all_items.extend(page_items)
+        if not got_a_page:
+            return None
+        return {"itemInfoList": all_items}
 
     @checkSessionExpiry
     def getListItem(self) -> None:
