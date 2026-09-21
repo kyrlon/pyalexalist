@@ -16,7 +16,7 @@ _PYTHON_CMD = Path(sys.executable).stem
 import requests
 
 from .exception import AlexaSessionExpiredException, DuplicateListNameException, DefaultListModificationException
-from .resource import List, ListItem
+from .resource import List, ListItem, ItemCheckedValue
 
 logger = logging.getLogger(__name__)
 
@@ -412,7 +412,7 @@ class AlexaAPI:
         return items[0]
 
     @checkSessionExpiry
-    def iterListItemPages(self, list_id: str, max_pages: int = 50):
+    def iterListItemPages(self, list_id: str, max_pages: int = 50, limit: int = 20):
         """Yield each page's itemInfoList from the Alexa API, following pagination.
 
         The server caps each response at the requested `limit` and hands back a
@@ -421,13 +421,32 @@ class AlexaAPI:
         returning one, yielding one page at a time rather than accumulating
         everything in memory (useful for lists with tens of thousands of items).
 
+        `limit` is not a reliably safe value to trust blindly at every size. The
+        server can return a false itemInfoList=[]/nextToken=null "empty and done"
+        response — at limit=100, limit=50, and even limit=20 or with no `limit` at
+        all — while real items still exist further in the list. This doesn't seem
+        to affect every list, every time: it's been seen on a list with a heavy
+        edit/delete history and not on an otherwise-clean one, so it looks like
+        something a list's server-side state can accumulate over time (e.g. a
+        large volume of past creates/deletes) rather than a bug that always fires
+        at a given `limit`. `limit=1` is the only value that's reliably found
+        everything in testing so far, at the cost of one HTTP request per item —
+        impractical as a default, but available if you need to double-check a
+        list that other values seem to be under-reporting.
+
         Args:
             list_id: Server list ID to fetch.
-            max_pages: Safety cap on pages followed (20 items/page) before giving
-                up (logged as a warning).
+            max_pages: Safety cap on pages followed before giving up (logged as a
+                warning).
+            limit: Items requested per page. Default 20
         Yields:
             list[dict]: the raw item dicts for each page, in order.
         """
+        if limit < 1:
+            logger.error("iterListItemPages:%s got limit=%d, clamping to 1 - limit=0 doesn't mean "
+                         "\"unlimited\" (server still returns a false empty/complete page), and "
+                         "limit<=-1 gets rejected server-side with a 400", list_id, limit)
+            limit = 1
         payload = {
             "itemAttributesToProject": [
                 "quantity",
@@ -450,12 +469,7 @@ class AlexaAPI:
                 {"type": "categoryOverride"},
             ],
         }
-        # limit=20 is deliberate, not arbitrary: empirically, limit=50 and limit=100
-        # returned itemInfoList=[] with nextToken=null which gave a false
-        # "empty and done" response even when real items existed further in the
-        # list. limit=20 (and omitting limit entirely) consistently returned the
-        # correct data and a real nextToken.
-        uri = self._endpoint_list_api + list_id + "/items/fetch?limit=20"
+        uri = self._endpoint_list_api + list_id + f"/items/fetch?limit={limit}"
 
         next_token = None
         for page_num in range(max_pages):
@@ -472,7 +486,7 @@ class AlexaAPI:
                 return
         logger.warning("getList:%s hit the %d-page pagination cap; list may be truncated", list_id, max_pages)
 
-    def getList(self, list_id: str, max_pages: int = 50) -> "dict | None":
+    def getList(self, list_id: str, max_pages: int = 50, limit: int = 20) -> "dict | None":
         """Fetch every item in a list from the Alexa API, following pagination.
 
         Convenience wrapper over `iterListItemPages()` that merges every page into
@@ -481,15 +495,16 @@ class AlexaAPI:
 
         Args:
             list_id: Server list ID to fetch.
-            max_pages: Safety cap on pages followed (20 items/page) before giving
-                up and returning whatever was collected so far.
+            max_pages: Safety cap on pages followed before giving up and returning
+                whatever was collected so far.
+            limit: Items requested per page
         Returns:
             Dict with a merged 'itemInfoList' covering every page, or None if the
             first page failed to return anything.
         """
         all_items = []
         got_a_page = False
-        for page_items in self.iterListItemPages(list_id, max_pages=max_pages):
+        for page_items in self.iterListItemPages(list_id, max_pages=max_pages, limit=limit):
             got_a_page = True
             all_items.extend(page_items)
         if not got_a_page:
@@ -788,6 +803,18 @@ class AlexaList:
 
             seen_item_ids = {i["itemId"] for i in raw_items["itemInfoList"]}
             for item in [i for i in lst.items if i.itemId is not None and i.itemId not in seen_item_ids]:
+                if item._server_itemStatus == ItemCheckedValue.CHECKED:
+                    # Absent from this fetch but the server last confirmed it as
+                    # COMPLETE. See iterListItemPages()'s docstring: some lists can
+                    # return a false empty/absent page even when items still exist
+                    # server-side, and so far this has only been seen affecting
+                    # COMPLETE items. A real ACTIVE item going missing is trusted
+                    # as a genuine deletion; a COMPLETE item is not, since a
+                    # genuine COMPLETE removal should go through an explicit
+                    # delete, not silent absence from a fetch. Retain it rather
+                    # than evict it.
+                    logger.debug("pull: '%s' absent from fetch but server-confirmed COMPLETE — retaining (possible pagination gap)", item.itemName)
+                    continue
                 lst.remove(item)
 
             for raw_item in raw_items["itemInfoList"]:
