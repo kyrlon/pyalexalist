@@ -4,7 +4,7 @@ import logging
 import sys
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from email.utils import parsedate_to_datetime
 from functools import wraps
 from pathlib import Path
@@ -754,8 +754,32 @@ class AlexaList:
         self.alexa_api.deleteList(lst.listId, lst.version)
         del self._lists[lst.id]
 
-    def resync(self) -> None:
-        """Discard all local state and rebuild from a full server fetch."""
+    @staticmethod
+    def _wants_exhaustive(exhaustive: "bool | Iterable[str]", lst: "List") -> bool:
+        """Whether `lst` should be fetched at limit=1 per an `exhaustive` argument.
+
+        `exhaustive` is either a bool (apply to every list, or none) or a
+        collection of list identifiers (`listId` or `listName`) naming just the
+        lists that need it — e.g. a known-corrupted list shouldn't force every
+        other clean list onto the slow one-request-per-item footprint too.
+        """
+        if isinstance(exhaustive, bool):
+            return exhaustive
+        return lst.listId in exhaustive or lst.listName in exhaustive
+
+    def resync(self, exhaustive: "bool | Iterable[str]" = False) -> None:
+        """Discard all local state and rebuild from a full server fetch.
+
+        Args:
+            exhaustive: Fetch items at limit=1 instead of the default page size
+                for the lists this selects — either True/False for every list,
+                or a collection of `listId`/`listName` values to target
+                specific lists only. Slower (one HTTP request per item), but
+                the only footprint that's reliably surfaced every item —
+                including COMPLETE ones — on a list where the default page size
+                has returned a false empty/complete response. See
+                `iterListItemPages()`'s docstring for why this isn't the default.
+        """
         raw = self.alexa_api.getAllLists()
         if not raw:
             return
@@ -764,8 +788,8 @@ class AlexaList:
             lst = List()
             lst.load(raw_list)
             self._lists[lst.id] = lst
-
-            raw_items = self.alexa_api.getList(lst.listId)
+            _kwargs = {"list_id" : lst.listId} | ({"limit" : 1 } if self._wants_exhaustive(exhaustive, lst) else {})
+            raw_items = self.alexa_api.getList(**_kwargs)
             if not raw_items or "itemInfoList" not in raw_items:
                 continue
 
@@ -774,11 +798,19 @@ class AlexaList:
                 item.load(raw_item)
                 lst._items[item.id] = item
 
-    def pull(self, force: bool = False) -> None:
+    def pull(self, force: bool = False, exhaustive: "bool | Iterable[str]" = False) -> None:
         """Fetch current server state — non-destructive, preserves unsynced local items.
 
         Args:
             force: If True, overwrite dirty local items with server state (discards pending changes).
+            exhaustive: Fetch items at limit=1 instead of the default page size
+                for the lists this selects — either True/False for every list,
+                or a collection of `listId`/`listName` values to target
+                specific lists only. Slower (one HTTP request per item), but
+                the only footprint that's reliably surfaced every item —
+                including COMPLETE ones — on a list where the default page size
+                has returned a false empty/complete response. See
+                `iterListItemPages()`'s docstring for why this isn't the default.
         """
         raw = self.alexa_api.getAllLists()
         if not raw:
@@ -796,8 +828,8 @@ class AlexaList:
                 lst = List()
                 self._lists[lst.id] = lst
             lst.load(raw_list)
-
-            raw_items = self.alexa_api.getList(list_id)
+            _kwargs = {"list_id" : lst.listId} | ({"limit" : 1 } if self._wants_exhaustive(exhaustive, lst) else {})
+            raw_items = self.alexa_api.getList(**_kwargs)
             if not raw_items or "itemInfoList" not in raw_items:
                 continue
 
