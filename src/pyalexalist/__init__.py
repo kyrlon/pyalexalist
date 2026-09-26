@@ -20,6 +20,11 @@ from .resource import List, ListItem, ItemCheckedValue
 
 logger = logging.getLogger(__name__)
 
+
+class _PaginationTruncated(Exception):
+    """Raised by iterListItemPages when pagination stops due to a non-2xx response mid-stream."""
+
+
 # Maps amazon_domain → cookie suffix used in ubid-*, at-*, sess-at-* cookie names.
 # Used as a startup fallback only — the actual suffix is detected from real cookie names
 # at runtime and overrides this value on first load or token exchange.
@@ -115,8 +120,39 @@ class AlexaAPI:
         ubid = next((name for name in cookies if name.startswith("ubid-")), None)
         return ubid.split("-", 1)[1] if ubid else None
 
-    @staticmethod
-    def _safe_json(response: requests.Response, label: str = "") -> "dict | None":
+    _AUTOMATED_ACCESS_BLOCK_MARKER = "api-services-support@amazon.com"
+
+    @classmethod
+    def _warn_automated_access_block(cls, response: requests.Response, label: str) -> bool:
+        """Log a specific, actionable warning if `response` is Amazon's automated-access
+        block page rather than a real API error, and report whether it was.
+
+        This page (an HTML body referencing api-services-support@amazon.com) shows up
+        instead of a normal error when Amazon's bot detection rejects the request —
+        commonly because the session cookies were obtained on a different machine/IP
+        than the one making the request (e.g. cookies copied to a cloud VM). It's easy
+        to mistake for a generic "Invalid JSON" parse failure, which gives no hint
+        about the actual cause.
+
+        Args:
+            response: The requests.Response to inspect.
+            label: Context string included in the warning message.
+        Returns:
+            True if the block page was detected (and the warning logged), else False.
+        """
+        if cls._AUTOMATED_ACCESS_BLOCK_MARKER not in response.text:
+            return False
+        logger.warning(
+            "Alexa API returned an automated-access block page%s (HTTP %d) — your "
+            "session cookies may be invalid for this machine/IP (e.g. cookies copied "
+            "to a different host than they were obtained on). Re-run the Alexa cookie "
+            "login on this host to obtain a fresh session.",
+            f" [{label}]" if label else "", response.status_code,
+        )
+        return True
+
+    @classmethod
+    def _safe_json(cls, response: requests.Response, label: str = "") -> "dict | None":
         """Decode the response JSON, returning None and logging a warning on empty or invalid bodies.
 
         Args:
@@ -131,6 +167,8 @@ class AlexaAPI:
         try:
             return response.json()
         except requests.exceptions.JSONDecodeError as e:
+            if cls._warn_automated_access_block(response, label):
+                return None
             logger.warning("Invalid JSON from Alexa API%s (status %d): %s", f" [{label}]" if label else "", response.status_code, e)
             return None
 
@@ -475,6 +513,22 @@ class AlexaAPI:
         for page_num in range(max_pages):
             request_body = dict(payload, **({"nextToken": next_token} if next_token else {}))
             response = self._session.post(uri, json=request_body)
+            if not response.ok:
+                label = f"getList:{list_id} (page {page_num})"
+                if not self._warn_automated_access_block(response, label):
+                    if page_num == 0:
+                        logger.warning(
+                            "getList:%s got HTTP %d on first page — no items returned",
+                            list_id, response.status_code,
+                        )
+                    else:
+                        logger.warning(
+                            "getList:%s got HTTP %d on page %d — pagination truncated; result is partial",
+                            list_id, response.status_code, page_num,
+                        )
+                if page_num == 0:
+                    return
+                raise _PaginationTruncated(list_id)
             page = self._safe_json(response, f"getList:{list_id} (page {page_num})")
             if not page:
                 if page_num > 0:
@@ -504,12 +558,16 @@ class AlexaAPI:
         """
         all_items = []
         got_a_page = False
-        for page_items in self.iterListItemPages(list_id, max_pages=max_pages, limit=limit):
-            got_a_page = True
-            all_items.extend(page_items)
-        if not got_a_page:
+        truncated = False
+        try:
+            for page_items in self.iterListItemPages(list_id, max_pages=max_pages, limit=limit):
+                got_a_page = True
+                all_items.extend(page_items)
+        except _PaginationTruncated:
+            truncated = True
+        if not got_a_page and not truncated:
             return None
-        return {"itemInfoList": all_items}
+        return {"itemInfoList": all_items, "_truncated": truncated}
 
     @checkSessionExpiry
     def getListItem(self) -> None:
@@ -834,7 +892,18 @@ class AlexaList:
                 continue
 
             seen_item_ids = {i["itemId"] for i in raw_items["itemInfoList"]}
+            truncated = raw_items.get("_truncated", False)
+            if truncated:
+                logger.warning(
+                    "pull: list '%s' fetch was truncated mid-pagination (non-2xx response) — "
+                    "skipping item eviction to avoid false deletions",
+                    lst.listId,
+                )
             for item in [i for i in lst.items if i.itemId is not None and i.itemId not in seen_item_ids]:
+                if truncated:
+                    # Partial fetch — we don't know what's really absent vs. just unreachable.
+                    # Retaining everything avoids the false-eviction → re-add cascade.
+                    continue
                 if item._server_itemStatus == ItemCheckedValue.CHECKED:
                     # Absent from this fetch but the server last confirmed it as
                     # COMPLETE. See iterListItemPages()'s docstring: some lists can
